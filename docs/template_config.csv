@@ -1,0 +1,13 @@
+Category,Key,Value
+Supervisor,Name,Supervisor A
+Supervisor,Name,Supervisor B
+Setting,ruleset_version,2022
+Setting,mode,Standard
+Setting,work_days,"['Mon', 'Tue', 'Wed', 'Thu', 'Fri']"
+Setting,work_hours_start,09:00
+Setting,work_hours_end,17:00
+Setting,primary_supervisor,Supervisor A
+Setting,trainee_name,
+Setting,trainee_id,
+Setting,fieldwork_state,
+Setting,fieldwork_country,USA

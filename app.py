@@ -125,11 +125,24 @@ if check_password():
         # Ensure dates are datetime objects for calc
         df_logs = st.session_state["local_logs"]
         if not df_logs.empty:
-            # Convert date if needed
-            if not pd.api.types.is_datetime64_any_dtype(df_logs['date']):
-                df_logs['date'] = pd.to_datetime(df_logs['date'])
-            # Fill NaNs in text fields
-            df_logs = df_logs.fillna("")
+            # Convert date if needed (handle mixed formats)
+            if 'date' in df_logs.columns and not pd.api.types.is_datetime64_any_dtype(df_logs['date']):
+                df_logs['date'] = pd.to_datetime(df_logs['date'], format='mixed', errors='coerce')
+            
+            # Fix energy_rating type (can be int, float, string, or empty)
+            if 'energy_rating' in df_logs.columns:
+                df_logs['energy_rating'] = pd.to_numeric(df_logs['energy_rating'], errors='coerce')
+            
+            # Fix duration type
+            if 'duration_hours' in df_logs.columns:
+                df_logs['duration_hours'] = pd.to_numeric(df_logs['duration_hours'], errors='coerce').fillna(0)
+            
+            # Fill NaNs in string fields only
+            string_cols = ['uid', 'activity_type', 'supervision_type', 'supervisor', 'notes']
+            for col in string_cols:
+                if col in df_logs.columns:
+                    df_logs[col] = df_logs[col].fillna("").astype(str)
+            
             st.session_state["local_logs"] = df_logs
             
         stats = engine.calculate_monthly_stats(st.session_state["local_logs"])
@@ -171,21 +184,37 @@ if check_password():
         # Filter for valid energy ratings
         energy_df = st.session_state["local_logs"].dropna(subset=["energy_rating"])
         if not energy_df.empty:
-            # Altair Heatmap
-            energy_chart = alt.Chart(energy_df).mark_rect().encode(
-                x=alt.X('date:T', axis=alt.Axis(format='%d', title='Day')),
-                y=alt.Y('month(date):O', title='Month'),
-                color=alt.Color('energy_rating:Q', scale=alt.Scale(domain=[1, 5], range=['white', '#ffbedb', '#800000']), legend=None),
-                tooltip=['date', 'energy_rating']
+            # Aggregate by date to get one value per day (mean if multiple entries per day)
+            daily_energy = energy_df.groupby('date', as_index=False).agg({
+                'energy_rating': 'mean'
+            })
+            
+            # Altair Heatmap - Calendar Grid
+            energy_chart = alt.Chart(daily_energy).mark_rect(
+                stroke='#000000',
+                strokeWidth=0.5
+            ).encode(
+                x=alt.X('date(date):O', axis=alt.Axis(title='Day', labelAngle=0)),
+                y=alt.Y('month(date):O', axis=alt.Axis(title='Month', format='%b')),
+                color=alt.Color('energy_rating:Q', 
+                    scale=alt.Scale(domain=[1, 5], range=['#FFFFFF', '#ffbedb', '#800000']), 
+                    legend=alt.Legend(title='Energy')
+                ),
+                tooltip=[
+                    alt.Tooltip('date:T', title='Date', format='%Y-%m-%d'),
+                    alt.Tooltip('energy_rating:Q', title='Energy', format='.1f')
+                ]
             ).properties(
-                height=150
+                height=200
             ).configure_axis(
-                grid=False
+                grid=False,
+                labelFontSize=10,
+                titleFontSize=12
             ).configure_view(
                 strokeWidth=0
             )
             
-            st.altair_chart(energy_chart, width="stretch")
+            st.altair_chart(energy_chart, use_container_width=True)
         else:
             st.caption("No energy data yet. Log sessions with 'Energy Level' to see your patterns.")
         
@@ -646,43 +675,105 @@ if check_password():
         st.markdown("## 📊 Google Sheets Setup (REQUIRED)")
         st.warning("You MUST complete this setup before the app can save your data!")
         
-        st.markdown("### Step 1: Create Your Google Sheet")
-        st.markdown("""
-        1.  Go to [Google Sheets](https://sheets.google.com) and sign in with your Google Account.
-        2.  Click **"+ Blank"** to create a new spreadsheet.
-        3.  **Name it** something like `BACB Fieldwork Tracker` (top-left corner).
-        4.  **Create TWO tabs** (worksheets) at the bottom of the sheet:
-            *   **Tab 1:** Rename the default "Sheet1" to exactly: `Logs`
-            *   **Tab 2:** Click the `+` button to add a new tab. Name it exactly: `Config`
-        """)
+        # Two paths: tabs for Automatic vs Manual
+        setup_method = st.radio(
+            "Choose your setup method:",
+            ["🚀 Automatic (Recommended)", "🔧 Manual"],
+            horizontal=True
+        )
         
-        st.info("💡 **Tip:** The tab names are case-sensitive. Make sure they are exactly `Logs` and `Config`.")
-        
-        st.markdown("### Step 2: Set Up the `Logs` Tab Schema")
-        st.markdown("""
-        In the **`Logs`** tab, create headers in **Row 1**. Copy these column headers exactly:
-        """)
-        st.code("uid | date | start_time | end_time | duration_hours | activity_type | supervision_type | supervisor | notes | energy_rating", language=None)
-        st.markdown("""
-        *   **uid:** A unique ID for each entry (auto-generated by the app).
-        *   **date:** The date of the session (YYYY-MM-DD).
-        *   **start_time / end_time:** Session times (HH:MM:SS).
-        *   **duration_hours:** Calculated hours (e.g., 1.5).
-        *   **activity_type:** "Restricted" or "Unrestricted".
-        *   **supervision_type:** "None", "Individual", or "Group".
-        *   **supervisor:** Name of your supervisor.
-        *   **notes:** Optional session notes.
-        *   **energy_rating:** Optional burnout tracker (1-5).
-        """)
-        
-        st.markdown("### Step 3: Set Up the `Config` Tab Schema")
-        st.markdown("""
-        In the **`Config`** tab, create headers in **Row 1**:
-        """)
-        st.code("Category | Key | Value", language=None)
-        st.markdown("""
-        This tab stores your supervisors and settings. The app will populate it automatically, but having the headers is required.
-        """)
+        if setup_method == "🚀 Automatic (Recommended)":
+            st.markdown("### Step 1: Download the Template Files")
+            st.markdown("Click the buttons below to download pre-configured CSV templates:")
+            
+            col_dl1, col_dl2 = st.columns(2)
+            
+            # Load and offer Logs template
+            with col_dl1:
+                try:
+                    with open("docs/template_logs.csv", "r") as f:
+                        logs_csv = f.read()
+                    st.download_button(
+                        label="⬇️ Download Logs Template",
+                        data=logs_csv,
+                        file_name="template_logs.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                except:
+                    st.error("Logs template not found")
+            
+            # Load and offer Config template
+            with col_dl2:
+                try:
+                    with open("docs/template_config.csv", "r") as f:
+                        config_csv = f.read()
+                    st.download_button(
+                        label="⬇️ Download Config Template",
+                        data=config_csv,
+                        file_name="template_config.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                except:
+                    st.error("Config template not found")
+            
+            st.markdown("### Step 2: Create Your Google Sheet")
+            st.markdown("""
+            1.  Go to [Google Sheets](https://sheets.google.com) and sign in.
+            2.  Click **"+ Blank"** to create a new spreadsheet.
+            3.  **Name it** `BACB Fieldwork Tracker` (top-left corner).
+            """)
+            
+            st.markdown("### Step 3: Import the Templates")
+            st.markdown("""
+            **For the Logs tab:**
+            1.  Rename the default "Sheet1" tab to exactly: `Logs`
+            2.  Go to **File → Import**
+            3.  Click **Upload** and select `template_logs.csv`
+            4.  Choose **"Replace current sheet"** and click **Import data**
+            
+            **For the Config tab:**
+            1.  Click the **+** button to create a new tab, name it exactly: `Config`
+            2.  Go to **File → Import**
+            3.  Click **Upload** and select `template_config.csv`
+            4.  Choose **"Replace current sheet"** and click **Import data**
+            """)
+            
+            st.success("✅ Your sheet is now properly formatted with all required columns and default settings!")
+            
+        else:  # Manual
+            st.markdown("### Step 1: Create Your Google Sheet")
+            st.markdown("""
+            1.  Go to [Google Sheets](https://sheets.google.com) and sign in with your Google Account.
+            2.  Click **"+ Blank"** to create a new spreadsheet.
+            3.  **Name it** something like `BACB Fieldwork Tracker` (top-left corner).
+            4.  **Create TWO tabs** (worksheets) at the bottom of the sheet:
+                *   **Tab 1:** Rename the default "Sheet1" to exactly: `Logs`
+                *   **Tab 2:** Click the `+` button to add a new tab. Name it exactly: `Config`
+            """)
+            
+            st.info("💡 **Tip:** The tab names are case-sensitive. Make sure they are exactly `Logs` and `Config`.")
+            
+            st.markdown("### Step 2: Set Up the `Logs` Tab Schema")
+            st.markdown("In the **`Logs`** tab, create headers in **Row 1**. Copy these column headers exactly:")
+            st.code("uid | date | start_time | end_time | duration_hours | activity_type | supervision_type | supervisor | notes | energy_rating", language=None)
+            st.markdown("""
+            *   **uid:** A unique ID for each entry (auto-generated by the app).
+            *   **date:** The date of the session (YYYY-MM-DD).
+            *   **start_time / end_time:** Session times (HH:MM:SS).
+            *   **duration_hours:** Calculated hours (e.g., 1.5).
+            *   **activity_type:** "Restricted" or "Unrestricted".
+            *   **supervision_type:** "None", "Individual", or "Group".
+            *   **supervisor:** Name of your supervisor.
+            *   **notes:** Optional session notes.
+            *   **energy_rating:** Optional burnout tracker (1-5).
+            """)
+            
+            st.markdown("### Step 3: Set Up the `Config` Tab Schema")
+            st.markdown("In the **`Config`** tab, create headers in **Row 1**:")
+            st.code("Category | Key | Value", language=None)
+            st.markdown("This tab stores your supervisors and settings. The app will populate it automatically, but having the headers is required.")
         
         st.markdown("---")
         
@@ -699,17 +790,16 @@ if check_password():
         st.markdown("### How to Share:")
         st.markdown("""
         1.  **Find the Service Account Email:**
-            *   This email was provided to you when the app was set up. It looks like:
             *   `service@bcba-fieldwork-tracker-sem.iam.gserviceaccount.com`
-            *   If you don't know it, check with your administrator or look in the app's secrets configuration.
         """)
         
-        st.info("📧 **Need the email?** Ask the app administrator for the Service Account email address.")
+        # Copyable email
+        st.code("service@bcba-fieldwork-tracker-sem.iam.gserviceaccount.com", language=None)
         
         st.markdown("""
         2.  **Open your Google Sheet** (the one you just created).
         3.  Click the **"Share"** button (top-right, green button).
-        4.  In the "Add people and groups" field, **paste the Service Account email**.
+        4.  **Paste the Service Account email** above into the "Add people and groups" field.
         5.  Set the permission to **"Editor"** (not Viewer!).
         6.  **Uncheck** "Notify people" (service accounts can't receive emails).
         7.  Click **"Share"**.
