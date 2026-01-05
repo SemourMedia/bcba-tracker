@@ -1,0 +1,24 @@
+{
+    "2022": {
+        "description": "5th Edition Standards",
+        "monthly_min_hours": 20,
+        "monthly_max_hours": 130,
+        "supervision_ratios": {
+            "Standard": 0.05,
+            "Concentrated": 0.10
+        },
+        "group_supervision_max_percent": 0.50,
+        "unrestricted_target_percent": 0.60
+    },
+    "2027": {
+        "description": "6th Edition Standards (Projected)",
+        "monthly_min_hours": 20,
+        "monthly_max_hours": 160,
+        "supervision_ratios": {
+            "Standard": 0.05,
+            "Concentrated": 0.10
+        },
+        "group_supervision_max_percent": 0.50,
+        "unrestricted_target_percent": 0.60
+    }
+}

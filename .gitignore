@@ -1,0 +1,35 @@
+# Streamlit secrets
+.streamlit/secrets.toml
+service_account.json
+
+# Secrets Directory (CRITICAL)
+.DONT/
+
+# Development Only
+.dev/
+.agent/
+scripts/
+tests/
+
+# Data Safety
+*.json
+!data/bacb_requirements.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Distributions
+dist/
+build/
+*.egg-info/
