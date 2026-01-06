@@ -36,7 +36,7 @@
 │  │  • Audit Validator                                    │  │
 │  └───────────────────────────────────────────────────────┘  │
 │                            │                                │
-│                   Service Account Auth                      │
+│                   Google OAuth 2.0                          │
 │                            │                                │
 └────────────────────────────┼────────────────────────────────┘
                              ▼
@@ -61,8 +61,8 @@
 
 ### Prerequisites
 - Python 3.10+
-- A Google Account
-- A Google Cloud Service Account ([setup guide](docs/setup/google_sheets_setup.md))
+- A Google Cloud Project with OAuth 2.0 Credentials ([setup guide](docs/setup/google_oauth_setup.md))
+- A Google Cloud Service Account for backend operations
 
 ### Local Development
 
@@ -96,9 +96,14 @@ bcba-tracker/
 ├── requirements.txt                # Python dependencies
 ├── BACB_Monthly_Verification_Form.pdf  # Official form template
 │
+├── auth/
+│   ├── google_oauth.py             # Google OAuth 2.0 flow
+│   └── __init__.py
+│
 ├── utils/
 │   ├── calculations.py             # Compliance engine & math
 │   ├── auditor.py                  # Audit "red flag" detector
+│   ├── user_registry.py            # User management & lookup
 │   ├── config_manager.py           # Settings persistence
 │   ├── data_manager.py             # Google Sheets integration
 │   ├── importer.py                 # Legacy data import (Ripley)
@@ -149,9 +154,9 @@ Rules are stored in `data/bacb_requirements.json` and can be updated without cod
 
 ## 🔒 Security Model
 
-1. **App Access**: Password gate (`st.secrets["APP_PASSWORD"]`)
-2. **Data Access**: Google Service Account (least privilege)
-3. **User Role**: User creates sheet, shares with Service Account as "Editor"
+1. **App Access**: Google OAuth 2.0 (Sign in with Google)
+2. **Data Access**: User-isolated Google Sheets (managed via Registry)
+3. **User Role**: Self-service onboarding (User creates sheet, app links it)
 4. **Privacy**: No PII/PHI columns. Sessions linked to Supervisor + Activity, never patients.
 
 ---

@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from typing import List, Dict, Any
-from utils.data_manager import DataManager
+from utils.gsheet import GSheetManager
 
 class ConfigManager:
     """
@@ -22,19 +22,20 @@ class ConfigManager:
             "trainee_name": "",
             "trainee_id": "",
             "fieldwork_state": "",
-            "fieldwork_country": "USA"
+            "fieldwork_country": "USA",
+            "time_precision": 15 # Minutes (1, 5, 15, 30)
         }
     }
 
-    def __init__(self):
-        self.dm = DataManager()
+    def __init__(self, gsheet_manager):
+        self.gm = gsheet_manager
         self._initialize_state()
 
     def _initialize_state(self):
         """Ensures config exists in session_state, loaded from DB if possible."""
         if "config" not in st.session_state:
             # Load from Sheet
-            df = self.dm.load_config_raw()
+            df = self.gm.load_config_raw()
             
             # Start with defaults
             config = {
@@ -83,7 +84,7 @@ class ConfigManager:
             rows.append({"Category": "Setting", "Key": k, "Value": val})
         
         df = pd.DataFrame(rows)
-        self.dm.save_config_raw(df)
+        self.gm.save_config_raw(df)
 
     @property
     def supervisors(self) -> List[str]:

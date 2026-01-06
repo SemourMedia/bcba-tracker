@@ -1,6 +1,7 @@
 # Streamlit secrets
 .streamlit/secrets.toml
 service_account.json
+client_secret*.json
 
 # Secrets Directory (CRITICAL)
 .DONT/
@@ -10,6 +11,7 @@ service_account.json
 .agent/
 scripts/
 tests/
+.pytest_cache/
 
 # Data Safety
 *.json

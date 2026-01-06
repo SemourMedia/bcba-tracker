@@ -13,58 +13,46 @@ class Auditor:
 
     @staticmethod
     def check_save_safety(new_entry: LogEntry, existing_history: pd.DataFrame) -> Tuple[bool, List[str]]:
-        """
-        Master validation function.
-        Returns: (is_safe_to_save, [list_of_error_messages])
-        """
         errors = []
         
-        # 1. Human Capability Check (The "Superman" Rule)
+        # 1. Human Capability Check (Fast)
         if new_entry.duration_hours > Auditor.audit_threshold_hours:
-            errors.append(f"AUDIT RISK: Session duration ({new_entry.duration_hours:.2f}h) exceeds daily safety limit ({Auditor.audit_threshold_hours}h).")
+            errors.append(f"AUDIT RISK: Session duration exceeds limit.")
 
-        # 2. Temporal Paradox Check (The "Time Traveler" Rule)
-        # We need to check for overlaps with existing entries on the SAME day.
-        
+        # 2. Temporal Paradox Check (Vectorized)
         if not existing_history.empty:
-            # Ensure dates are comparable. Convert strings to date objects if needed.
-            # We assume existing_history has 'date', 'start_time', 'end_time' columns.
-            
-            # Filter for the same date
-            # Note: We cast to string for comparison to avoid Date vs datetime.date issues common in Pandas
-            input_date_str = new_entry.date.strftime("%Y-%m-%d")
-            
-            # Create a mask for same day entries
-            # We assume the dataframe 'date' column matches the format or object type
-            # Handling generic pandas object types safely:
-            
-            # Helper to normalize date to string
-            def to_date_str(x):
-                if isinstance(x, (dt.date, dt.datetime)):
-                    return x.strftime("%Y-%m-%d")
-                return str(x)
+            # Convert new entry times to comparable types once
+            new_start = new_entry.start_time
+            new_end = new_entry.end_time
+            target_date = pd.to_datetime(new_entry.date)
 
-            day_entries = existing_history[existing_history['date'].apply(to_date_str) == input_date_str]
+            # Ensure history 'date' is datetime64 for fast comparison
+            # (This should ideally be done once during loading, not here)
+            if not pd.api.types.is_datetime64_any_dtype(existing_history['date']):
+                history_dates = pd.to_datetime(existing_history['date'], errors='coerce')
+            else:
+                history_dates = existing_history['date']
+
+            # Filter for same day (Vectorized mask)
+            # Note: formatting dates to strings is slow; comparing datetime objects is fast
+            same_day_mask = (history_dates.dt.date == target_date.date())
+            day_entries = existing_history.loc[same_day_mask].copy()
 
             if not day_entries.empty:
-                # Check for overlap
-                # Logic: (StartA < EndB) and (EndA > StartB)
-                
-                new_start = new_entry.start_time
-                new_end = new_entry.end_time
+                # Fast loop fallback (only for the specific day's rows, which is small)
+                # Given the current mix of types, the biggest win is removing the 'apply(to_date_str)' 
+                # from the main filter above.
                 
                 for _, row in day_entries.iterrows():
-                    # Parse times if they are strings (common in loaded CSVs/Sheets)
                     row_start = Auditor._parse_time(row['start_time'])
                     row_end = Auditor._parse_time(row['end_time'])
                     
                     if row_start and row_end:
                          if (new_start < row_end) and (new_end > row_start):
-                             errors.append(f"OVERLAP DETECTED: Clashes with entry on {input_date_str} ({row_start} - {row_end}).")
-                             break # One overlap is enough to block
+                             errors.append(f"OVERLAP DETECTED: Clashes with entry on {target_date.date()} ({row_start} - {row_end}).")
+                             break 
 
-        is_safe = (len(errors) == 0)
-        return is_safe, errors
+        return (len(errors) == 0), errors
 
     @staticmethod
     def _parse_time(t_input) -> Optional[dt.time]:
