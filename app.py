@@ -2,14 +2,19 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 from utils.config_manager import ConfigManager
-from utils.data_manager import DataManager
+from utils.gsheet import GSheetManager
+from utils.config_manager import ConfigManager
+from utils.gsheet import GSheetManager
+from utils.logo import render_sidebar_logo
+from utils.calculations import ComplianceEngine
 import uuid
 
 # MUST be the first Streamlit command
 st.set_page_config(
-    page_title="BACB Fieldwork Tracker",
-    page_icon="📊",
-    layout="centered"
+    page_title="BCBA Fieldwork Tracker",
+    page_icon="assets/favicon.svg",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 def inject_custom_css():
@@ -53,6 +58,9 @@ def inject_custom_css():
             /* Hide Streamlit Branding if possible (optional) */
             #MainMenu {visibility: hidden;}
             footer {visibility: hidden;}
+            
+            /* Remove Streamlit's default top padding to make logo distinct */
+            .css-1d391kg { padding-top: 1rem; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -64,41 +72,243 @@ inject_custom_css()
 if "page" not in st.session_state:
     st.session_state["page"] = "Home"
 
-# Initialize Config Manager
-config_manager = ConfigManager()
+# =============================================================================
+# AUTHENTICATION (V2: Google OAuth)
+# =============================================================================
 
-def check_password():
-    """Returns `True` if the user had the correct password."""
-
-    def password_entered():
-        """Checks whether a password entered by the user is correct."""
-        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # don't store password
-        else:
-            st.session_state["password_correct"] = False
-
-    if "password_correct" not in st.session_state:
-        # First run, show input for password.
-        st.text_input(
-            "Please enter the access password", type="password", on_change=password_entered, key="password"
-        )
-        return False
-    elif not st.session_state["password_correct"]:
-        # Password not correct, show input + error.
-        st.text_input(
-            "Please enter the access password", type="password", on_change=password_entered, key="password"
-        )
-        st.error("😕 Password incorrect")
-        return False
+def check_auth():
+    """Authenticate user via Google OAuth or fallback to password.
+    
+    Returns:
+        True if authenticated, False otherwise
+    """
+    # Check if V2 OAuth is configured
+    use_oauth = (
+        "google_oauth" in st.secrets 
+        and st.secrets["google_oauth"].get("client_id")
+        and st.secrets["google_oauth"]["client_id"] != "YOUR_CLIENT_ID.apps.googleusercontent.com"
+    )
+    
+    if use_oauth:
+        return _check_oauth()
     else:
-        # Password correct.
-        return True
+        st.error("Google OAuth not configured. Please add [google_oauth] secrets.")
+        st.stop()
 
-if check_password():
+
+def _check_oauth():
+    """V2: Google OAuth authentication flow."""
+    try:
+        from auth import GoogleAuthenticator
+        from auth.google_oauth import render_user_profile
+        
+        auth = GoogleAuthenticator(
+            client_id=st.secrets["google_oauth"]["client_id"],
+            client_secret=st.secrets["google_oauth"]["client_secret"],
+            redirect_uri=st.secrets["google_oauth"]["redirect_uri"]
+        )
+        
+        user = auth.require_auth()
+        
+        if user:
+            # User is authenticated - handle user registry
+            _handle_user_registry(user)
+            return True
+        else:
+            # Not authenticated - login page is shown by require_auth()
+            return False
+            
+        st.error(f"OAuth module not available: {e}")
+        st.stop()
+    except Exception as e:
+        st.error(f"OAuth error: {e}")
+        return False
+
+
+def _handle_user_registry(user: dict):
+    """Handle user registry lookup and provisioning for V2."""
+    # Check if registry is configured
+    if "registry" not in st.secrets or not st.secrets["registry"].get("sheet_url"):
+        # No registry configured - just store user in session
+        st.session_state["current_user"] = user
+        return
+    
+    try:
+        @st.cache_resource
+        def get_registry_connection_v2():
+            from utils.user_registry import UserRegistry
+            return UserRegistry(st.secrets["registry"]["sheet_url"])
+            
+        registry = get_registry_connection_v2()
+        
+        # 1. Lookup User
+        user_record = registry.get_user_by_email(user["email"])
+        
+        if not user_record:
+            # 2. New User -> Show Onboarding UI
+            _render_onboarding(user, registry)
+            
+            # Stop execution here (don't load the dashboard yet)
+            st.stop()
+            
+        else:
+            # 3. Existing User -> Update Login & Load Context
+            if "login_updated" not in st.session_state:
+                try:
+                    registry.update_last_login(user_record["user_id"])
+                    st.session_state["login_updated"] = True
+                except Exception:
+                    pass # Don't block
+            
+            st.session_state["current_user"] = user_record
+        
+    except Exception as e:
+        # Non-critical - continue without registry features if partial failure
+        # But if we STOPPED in onboarding, we won't get here.
+        st.error(f"Registry Error: {e}")
+        st.session_state["current_user"] = user
+
+def _render_onboarding(user: dict, registry: object):
+    """Render the self-service onboarding flow for new users."""
+    
+    st.markdown("""
+    <style>
+    .onboarding-header {
+        font-family: 'Playfair Display', serif;
+        color: #000000;
+        font-size: 2.5rem;
+        margin-bottom: 1rem;
+    }
+    .step-card {
+        background-color: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 0px;
+        border-left: 5px solid #800000;
+        margin-bottom: 1.5rem;
+    }
+    .step-number {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.9rem;
+        color: #800000;
+        font-weight: bold;
+        text-transform: uppercase;
+        margin-bottom: 0.5rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="onboarding-header">Welcome to your Tracker</div>', unsafe_allow_html=True)
+    
+    st.info(f"👋 Hi {user['name']}! Let's get your personal fieldwork tracker set up.")
+    
+    st.markdown("### Step 1: Create your Sheet")
+    st.write("Since this is a privacy-first app, **you own your data**. Create your own tracking sheet from our official template.")
+    
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.link_button("📄 Open Template", "https://docs.google.com/spreadsheets/d/1N55aCT-yfz8jMoohVUQ3VWpvecrFCSRcZpj7GVSlbVY/copy", type="primary")
+    with col2:
+        st.caption("Click 'Make a copy' when prompted.")
+
+    st.divider()
+
+    st.markdown("### Step 2: Share with the App")
+    st.write("The app needs permission to read and write to your new sheet.")
+    
+    sa_email = st.secrets["connections"]["gsheets"].get("client_email", "service@...")
+    st.code(sa_email, language="text")
+    st.caption("Copy this email, click **Share** in your new Google Sheet, and paste it as an **Editor**.")
+
+    st.divider()
+
+    st.markdown("### Step 3: Link it here")
+    st.write("Paste the full URL of your new sheet below so the app can find it.")
+
+    sheet_url = st.text_input("📋 Paste Google Sheet URL", placeholder="https://docs.google.com/spreadsheets/d/...")
+
+    if st.button("🚀 Link My Tracker", type="primary"):
+        if not sheet_url:
+            st.error("Please paste your Sheet URL first.")
+            return
+
+        with st.status("Verifying connection...") as status:
+            try:
+                # 1. Validate Access
+                # We can use the registry's existing gspread client to test access
+                gc = registry.client
+                try:
+                    target_sheet = gc.open_by_url(sheet_url)
+                    status.write("✅ Access Verified: Found sheet!")
+                except Exception:
+                    status.update(label="Access Denied", state="error")
+                    st.error("❌ Could not access sheet. Did you share it with the email above?")
+                    return
+
+                # 2. Check Tabs (Simple check)
+                try:
+                    target_sheet.worksheet("Logs")
+                    status.write("✅ Format Verified: 'Logs' tab found.")
+                except Exception:
+                    status.update(label="Invalid Format", state="error")
+                    st.error("❌ Invalid Sheet. Please use the official template (missing 'Logs' tab).")
+                    return
+
+                # 3. Register User
+                status.write("📝 Registering your account...")
+                user_record = registry.register_user(
+                    email=user["email"],
+                    display_name=user["name"],
+                    sheet_url=sheet_url,
+                    sheet_id=target_sheet.id
+                )
+                
+                status.update(label="Success!", state="complete")
+                st.balloons()
+                st.success("You are all set! Reloading...")
+                import time
+                time.sleep(1.5)
+                st.rerun()
+
+            except Exception as e:
+                status.update(label="Error", state="error")
+                st.error(f"Something went wrong: {str(e)}")
+
+
+
+# Config Manager initialized later
+
+
+if check_auth():
+    # --- INITIALIZE DATA LAYER (Post-Auth) ---
+    user = st.session_state.get("current_user", {})
+    sheet_url = user.get("sheet_url")
+    
+    # Fallback for V1 (Legacy Secrets)
+    if not sheet_url:
+        # Check secrets for default sheet
+        try:
+             sheet_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
+        except:
+             pass
+             
+    if not sheet_url:
+        st.error("No Google Sheet connected. Please sign in or check configuration.")
+        st.stop()
+        
+    # Initialize Managers ONLY if not present
+    if "config_manager" not in st.session_state:
+        gm = GSheetManager(sheet_url)
+        st.session_state["gm"] = gm
+        st.session_state["config_manager"] = ConfigManager(gm)
+
+    # Retrieve from state
+    gm = st.session_state["gm"]
+    config_manager = st.session_state["config_manager"]
+
     # Sidebar Navigation
+    render_sidebar_logo()
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Home", "Import Data", "Settings", "Reports", "Help"])
+    page = st.sidebar.radio("Go to", ["Home", "Import Data", "Settings", "Reports", "Privacy", "Help"])
     
     if page == "Home":
         # --- 3A: DASHBOARD VISUALS (FRENCH CLINICAL) ---
@@ -107,9 +317,13 @@ if check_password():
         st.markdown("# 📂 Fieldwork Ledger")
         
         # 2. Metrics / Progress
-        from utils.calculations import ComplianceEngine
         
-        # Initialize Engine (Default to 2022/Standard for now)
+        # OPTIMIZATION: Cache the stats calculation
+        @st.cache_data(show_spinner=False)
+        def get_cached_stats(df, version, mode):
+            engine = ComplianceEngine(ruleset_version=version, mode=mode)
+            return engine.calculate_monthly_stats(df)
+        
         # Initialize Engine (Default to 2022/Standard for now)
         current_settings = config_manager.settings
         engine = ComplianceEngine(
@@ -118,9 +332,8 @@ if check_password():
         )
         
         # Load Data from Google Sheets
-        dm = DataManager()
         if "local_logs" not in st.session_state:
-             st.session_state["local_logs"] = dm.load_logs()
+             st.session_state["local_logs"] = gm.load_logs()
         
         # Ensure dates are datetime objects for calc
         df_logs = st.session_state["local_logs"]
@@ -145,7 +358,11 @@ if check_password():
             
             st.session_state["local_logs"] = df_logs
             
-        stats = engine.calculate_monthly_stats(st.session_state["local_logs"])
+        stats = get_cached_stats(
+            st.session_state["local_logs"],
+            current_settings.get("ruleset_version", "2022"),
+            current_settings.get("mode", "Standard")
+        )
         
         col_m1, col_m2, col_m3 = st.columns(3)
         col_m1.metric("Month Hours", f"{stats.total_hours:.1f}h", delta=f"{stats.hours_needed_for_5_percent:.1f}h to 5%")
@@ -214,7 +431,7 @@ if check_password():
                 strokeWidth=0
             )
             
-            st.altair_chart(energy_chart, use_container_width=True)
+            st.altair_chart(energy_chart, width="stretch")
         else:
             st.caption("No energy data yet. Log sessions with 'Energy Level' to see your patterns.")
         
@@ -235,14 +452,51 @@ if check_password():
             with c2:
                 # Smart Defaults for time could go here
                 # Feature D: Session Chaining
-                default_start = dt.time(9, 0)
+                # Feature D: Session Chaining & Smart Time Defaults
                 if "last_end_time" in st.session_state:
                     default_start = st.session_state["last_end_time"]
+                else:
+                    # Default to current time, rounded up to next 15 min interval
+                    now_dt = dt.datetime.now()
+                    # Calculate minutes to add to reach next 15m mark
+                    # If minutes % 15 is 0, we can stay or add 15? "Rounding up" usually implies future.
+                    # Let's say if we are exactly on :00, :15, :30, :45 stay there? 
+                    # User said "closest time, rounding up". 
+                    # If 10:01 -> 10:15. If 10:14 -> 10:15. If 10:15 -> 10:15.
                     
-                start_input = st.time_input("Start Time", value=default_start)
+                    minutes = now_dt.minute
+                    remainder = minutes % 15
+                    if remainder == 0:
+                         add_minutes = 0
+                    else:
+                         add_minutes = 15 - remainder
+                    
+                    rounded = now_dt + dt.timedelta(minutes=add_minutes)
+                    # Handle hour overflow (if result is tomorrow, just clamp to 23:45 or wrap? time object handles wrap by just showing time)
+                    # But if we go to next day, date input is separate. 
+                    # It's fine, we just want the time component.
+                    default_start = rounded.time().replace(second=0, microsecond=0)
+
+                # Start Time Input
+                # Get Configured Precision
+                precision_min = config_manager.settings.get("time_precision", 15)
+                try:
+                    precision_min = int(precision_min)
+                except:
+                    precision_min = 15
+                
+                step_seconds = precision_min * 60
+
+                start_input = st.time_input("Start Time", value=default_start, step=step_seconds)
                 
             with c3:
-                end_input = st.time_input("End Time", value=dt.time(10, 0))
+                # Calculate default end time = start + 30 mins
+                # Use a dummy date to handle time arithmetic
+                dummy_dt = dt.datetime.combine(dt.date.today(), default_start)
+                default_end_dt = dummy_dt + dt.timedelta(minutes=30)
+                default_end = default_end_dt.time().replace(second=0, microsecond=0)
+                
+                end_input = st.time_input("End Time", value=default_end, step=step_seconds)
         
             c4, c5, c6 = st.columns(3)
             
@@ -382,7 +636,7 @@ if check_password():
                     st.session_state["local_logs"] = pd.concat([st.session_state["local_logs"], new_row], ignore_index=True)
                 
                 # Save Remote
-                dm.save_logs(st.session_state["local_logs"])
+                gm.save_logs(st.session_state["local_logs"], user_id=user.get("user_id"))
 
                 # Re-calculate stats to check for Celebration
                 new_stats = engine.calculate_monthly_stats(st.session_state["local_logs"])
@@ -514,6 +768,29 @@ if check_password():
                     config_manager.remove_supervisor(sup)
                     st.rerun()
         
+        
+        # --- TIME PRECISION ---
+        st.markdown("### ⏱️ Time Precision")
+        c_time1, c_time2 = st.columns(2)
+        with c_time1:
+            current_precision = config_manager.settings.get("time_precision", 15)
+            # Ensure it's an int
+            try:
+                current_precision = int(current_precision)
+            except:
+                current_precision = 15
+                
+            new_precision = st.selectbox(
+                "Time Input Step (Minutes)", 
+                [1, 5, 15, 30],
+                index=[1, 5, 15, 30].index(current_precision) if current_precision in [1, 5, 15, 30] else 2,
+                help="Controls the granularity of the time dropdowns."
+            )
+            
+            if new_precision != current_precision:
+                config_manager.update_setting("time_precision", new_precision)
+                st.rerun()
+
         st.markdown("---")
         
         # --- PRIMARY SUPERVISOR & SMART DEFAULTS ---
@@ -666,6 +943,38 @@ if check_password():
         else:
             st.warning("No data found for this selection. Cannot generate report.")
 
+    elif page == "Privacy":
+        st.markdown("# 🔒 Privacy Ledger")
+        st.markdown("### Transparency Report")
+        
+        st.write("""
+        This application operates on a **"Bring Your Own Data"** model. 
+        Unlike traditional SaaS products, we do not host a central database of your fieldwork logs.
+        """)
+        
+        st.markdown("#### 1. Data Ownership")
+        st.success("""
+        **You own your data.** All fieldwork logs are stored in a private Google Sheet that *you* create and control. 
+        The application is simply a logic layer that calculates your hours.
+        """)
+        
+        st.markdown("#### 2. Data Isolation")
+        st.write("""
+        - **Your Sheet:** Contains your specialized 5th Edition Fieldwork Logs.
+        - **Our Access:** The application uses a Service Account to read/write to your sheet *only while you are using the app*.
+        - **Revocation:** You can revoke access at any time by removing the Service Account email from your Google Sheet's "Share" settings.
+        """)
+        
+        st.markdown("#### 3. Security & Audit Trail")
+        st.write("""
+        To ensure security and prevent abuse, we maintain a minimal **Master Registry** containing:
+        - **User Identity:** Email and internal UUID.
+        - **Linkage:** The URL of your personal tracking sheet.
+        - **Audit Logs:** Timestamps of logins and account creation events.
+        """)
+        
+        st.warning("We DO NOT store or log any client names, PHI (Protected Health Information), or specific session notes in our central registry.")
+
     elif page == "Help":
         st.markdown("# ❓ Setup & FAQ")
         
@@ -697,8 +1006,7 @@ if check_password():
                         label="⬇️ Download Logs Template",
                         data=logs_csv,
                         file_name="template_logs.csv",
-                        mime="text/csv",
-                        use_container_width=True
+                        mime="text/csv"
                     )
                 except:
                     st.error("Logs template not found")
@@ -712,8 +1020,7 @@ if check_password():
                         label="⬇️ Download Config Template",
                         data=config_csv,
                         file_name="template_config.csv",
-                        mime="text/csv",
-                        use_container_width=True
+                        mime="text/csv"
                     )
                 except:
                     st.error("Config template not found")

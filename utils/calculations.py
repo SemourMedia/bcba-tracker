@@ -79,12 +79,9 @@ class ComplianceEngine:
         # 2. Supervised Hours
         # Filter where supervision_type is NOT None
         # Note: We compare against the string value of the Enum usually stored in DB/DF
-        try:
-            # If stored as Enum objects
-            sup_mask = df['supervision_type'].apply(lambda x: x != SupervisionType.NONE.value and x != SupervisionType.NONE)
-        except:
-            # Fallback if string
-            sup_mask = df['supervision_type'] != "None"
+        # Vectorized Check
+        invalid_types = [SupervisionType.NONE.value, "None", None, "", SupervisionType.NONE]
+        sup_mask = ~df['supervision_type'].isin(invalid_types)
             
         supervised_hours = df.loc[sup_mask, 'duration_hours'].sum()
         independent_hours = total_hours - supervised_hours
